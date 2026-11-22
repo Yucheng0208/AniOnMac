@@ -51,7 +51,12 @@ static void loadAPI(void) {
         fail(@"Required private cursor API is unavailable. No cursors changed.");
 }
 
-static NSDictionary *readCape(NSString *path) {
+// The private registration API rejects >24 frames, but macOS itself registers
+// longer animations (the native Wait cursor has 30). Snapshots/backups of the
+// live system therefore may exceed the registration limit.
+enum { kRegisterMaxFrames = 24, kSnapshotMaxFrames = 128 };
+
+static NSDictionary *readCapeLimited(NSString *path, NSUInteger maxFrames) {
     NSData *data = [NSData dataWithContentsOfFile:path];
     if (!data) fail(@"Cannot read cape file.");
     id value = [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:NULL];
@@ -71,7 +76,7 @@ static NSDictionary *readCape(NSString *path) {
         double w = [c[@"PointsWide"] doubleValue], h = [c[@"PointsHigh"] doubleValue];
         double x = [c[@"HotSpotX"] doubleValue], y = [c[@"HotSpotY"] doubleValue];
         double n = [c[@"FrameCount"] doubleValue], duration = [c[@"FrameDuration"] doubleValue];
-        if (n < 1 || n > 24 || floor(n) != n || w <= 0 || h <= 0 || w > 512 || h > 512 || x < 0 || y < 0 || x >= w || y >= h || duration < 0 || (n > 1 && duration <= 0))
+        if (n < 1 || n > maxFrames || floor(n) != n || w <= 0 || h <= 0 || w > 512 || h > 512 || x < 0 || y < 0 || x >= w || y >= h || duration < 0 || (n > 1 && duration <= 0))
             fail(@"Cursor dimensions, timing or hotspot out of bounds.");
         id reps = c[@"Representations"];
         if (![reps isKindOfClass:NSArray.class] || [reps count] == 0) fail(@"Missing image representations.");
@@ -83,6 +88,44 @@ static NSDictionary *readCape(NSString *path) {
         }
     }
     return cursors;
+}
+
+static NSDictionary *readCape(NSString *path) { return readCapeLimited(path, kRegisterMaxFrames); }
+
+// Uniformly subsample a vertically stacked animation so it fits the
+// registration limit while keeping the original cycle duration.
+static NSDictionary *fitFrames(NSDictionary *c) {
+    NSUInteger n = [c[@"FrameCount"] unsignedIntegerValue];
+    if (n <= kRegisterMaxFrames) return c;
+    NSUInteger stride = (n + kRegisterMaxFrames - 1) / kRegisterMaxFrames;
+    NSUInteger outFrames = n / stride;
+    NSMutableArray *reps = [NSMutableArray array];
+    for (NSData *data in c[@"Representations"]) {
+        NSBitmapImageRep *rep = [NSBitmapImageRep imageRepWithData:data];
+        CGImageRef image = rep.CGImage;
+        if (!image) return nil;
+        size_t w = CGImageGetWidth(image), fh = CGImageGetHeight(image) / n;
+        CGColorSpaceRef color = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+        CGContextRef ctx = CGBitmapContextCreate(NULL, w, fh * outFrames, 8, w * 4, color, (CGBitmapInfo)kCGImageAlphaPremultipliedLast);
+        CGColorSpaceRelease(color);
+        if (!ctx) return nil;
+        for (NSUInteger step = 0; step < outFrames; step++) {
+            CGImageRef frame = CGImageCreateWithImageInRect(image, CGRectMake(0, step * stride * fh, w, fh));
+            CGContextDrawImage(ctx, CGRectMake(0, (outFrames - 1 - step) * fh, w, fh), frame);
+            CGImageRelease(frame);
+        }
+        CGImageRef out = CGBitmapContextCreateImage(ctx);
+        CGContextRelease(ctx);
+        NSData *png = [[[NSBitmapImageRep alloc] initWithCGImage:out] representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+        CGImageRelease(out);
+        if (!png) return nil;
+        [reps addObject:png];
+    }
+    NSMutableDictionary *r = [c mutableCopy];
+    r[@"FrameCount"] = @(outFrames);
+    r[@"FrameDuration"] = @([c[@"FrameDuration"] doubleValue] * stride);
+    r[@"Representations"] = reps;
+    return r;
 }
 
 static BOOL applyOne(NSString *key, NSDictionary *c) {
@@ -224,8 +267,15 @@ int main(int argc, const char *argv[]) {
         BOOL applying = ([command isEqualToString:@"apply"] && argc == 4) || replacing;
         BOOL restoring = [command isEqualToString:@"restore"] && argc == 3;
         if (!applying && !restoring) fail(@"Invalid arguments. Use doctor, validate FILE, plan FILE, inspect, verify FILE, apply FILE BACKUP, or restore BACKUP.");
-        NSDictionary *input = readCape(@(argv[2]));
-        NSDictionary *target = effectiveCursors(input, modern);
+        NSDictionary *input = restoring ? readCapeLimited(@(argv[2]), kSnapshotMaxFrames) : readCape(@(argv[2]));
+        NSMutableDictionary *target = [effectiveCursors(input, modern) mutableCopy];
+        if (restoring) {
+            for (NSString *key in target.allKeys) {
+                NSDictionary *fitted = fitFrames(target[key]);
+                if (!fitted) fail(@"Cannot resample backup animation. No cursors changed.");
+                target[key] = fitted;
+            }
+        }
         if (restoring && modern && (input[@"com.apple.coregraphics.Arrow"] || input[@"com.apple.coregraphics.IBeam"]))
             puts("Legacy backup: routing stored Arrow/IBeam images to ArrowS/IBeamS on macOS 26+. This restores stored images, not an unrecorded historical alias state.");
         loadAPI();
@@ -236,7 +286,7 @@ int main(int argc, const char *argv[]) {
             NSString *path = @(argv[3]);
             NSError *error = nil;
             if (!saveBackup(before, path, replacing, &error)) fail([NSString stringWithFormat:@"Cannot save backup: %@", error]);
-            (void)readCape(path);
+            (void)readCapeLimited(path, kSnapshotMaxFrames);
             printf("Backup saved: %s\n", path.UTF8String);
         }
         BOOL success = YES;
@@ -246,8 +296,13 @@ int main(int argc, const char *argv[]) {
         if (success) success = verify(target);
         if (!success) {
             BOOL ok = YES;
-            for (NSString *key in keys) if (!applyOne(key, before[key])) ok = NO;
-            if (ok) ok = verify(before);
+            NSMutableDictionary *rollback = [NSMutableDictionary dictionary];
+            for (NSString *key in keys) {
+                NSDictionary *fitted = fitFrames(before[key]);
+                if (!fitted || !applyOne(key, fitted)) ok = NO;
+                else rollback[key] = fitted;
+            }
+            if (ok) ok = verify(rollback);
             fail(ok ? @"Apply/readback failed; prior metadata restored. Verify appearance." : @"Apply or rollback verification failed. Use saved backup to restore.");
         }
         puts("Selected cursor registrations and metadata readbacks succeeded. Verify visible appearance, animation and click alignment in your apps.");

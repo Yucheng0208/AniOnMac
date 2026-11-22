@@ -49,6 +49,24 @@ int main(void) {
         assert(saveBackup(@{@"com.apple.coregraphics.Wait": wait}, backup, YES, &error));
         assert(readCape(backup).count == 1);
         [NSFileManager.defaultManager removeItemAtPath:backup error:NULL];
+
+        // A live snapshot can hold Apple's 30-frame Wait; backups must accept it
+        // and restore must resample it under the 24-frame registration limit.
+        NSUInteger tall = 30;
+        NSBitmapImageRep *strip = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL pixelsWide:4 pixelsHigh:4 * tall
+            bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSCalibratedRGBColorSpace bytesPerRow:0 bitsPerPixel:0];
+        NSDictionary *live = @{@"PointsWide": @24, @"PointsHigh": @24, @"HotSpotX": @12, @"HotSpotY": @11,
+                               @"FrameCount": @(tall), @"FrameDuration": @(1.0 / 60),
+                               @"Representations": @[[strip representationUsingType:NSBitmapImageFileTypePNG properties:@{}]]};
+        NSString *snap = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
+        assert(saveBackup(@{@"com.apple.coregraphics.Wait": live}, snap, NO, &error));
+        assert(readCapeLimited(snap, kSnapshotMaxFrames).count == 1);
+        [NSFileManager.defaultManager removeItemAtPath:snap error:NULL];
+        NSDictionary *fitted = fitFrames(live);
+        assert([fitted[@"FrameCount"] unsignedIntegerValue] == 15);
+        assert(fabs([fitted[@"FrameDuration"] doubleValue] - 2.0 / 60) < 1e-9);
+        assert([NSBitmapImageRep imageRepWithData:fitted[@"Representations"][0]].pixelsHigh == 4 * 15);
+        assert(fitFrames(wait) == wait);
         puts("PASS: legacy/new aliases, explicit alias priority, backup round-trip, readback mismatch detection. No system cursor calls.");
     }
     return 0;
