@@ -300,7 +300,6 @@ struct ContentView: View {
             }
             ZStack {
                 RoundedRectangle(cornerRadius: 16).fill(Color.white)
-                VStack { Text(studio.t("placeholder")).modifier(SecondaryCopy()); Spacer() }.padding(22)
                 if let asset = studio.cache[slot.preview] {
                     CursorPreview(asset: asset, size: slot.size, hotspot: studio.hotNormalized(slot), mark: showHotspot, update: { studio.setHotspot($0) })
                 } else { Text(studio.t("noCursor")).font(.callout).foregroundStyle(.secondary) }
