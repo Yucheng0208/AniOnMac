@@ -57,14 +57,14 @@ struct SmallActionStyle: ButtonStyle {
         @Environment(\.accessibilityReduceMotion) var reduceMotion
         var pressed: Bool { enabled && configuration.isPressed }
         var fill: Color {
-            if pressed { return primary ? Color(red: 0.65, green: 0.29, blue: 0.08) : Color(red: 0.96, green: 0.68, blue: 0.39) }
+            if pressed { return primary ? accentPressed : apricotPressed }
             if hovered && enabled { return primary ? accent.opacity(0.85) : apricot }
-            return primary ? accent : (selected ? apricot.opacity(0.65) : (borderless ? Color.clear : Color.white))
+            return primary ? accent : (selected ? apricot.opacity(0.65) : (borderless ? Color.clear : surface))
         }
         var body: some View {
             configuration.label
                 .padding(.horizontal, row ? 0 : 9).padding(.vertical, row ? 0 : 5)
-                .foregroundStyle(primary ? Color.white : ink)
+                .foregroundStyle(primary ? onAccent : ink)
                 .background(fill, in: RoundedRectangle(cornerRadius: row ? 10 : 6))
                 .overlay(RoundedRectangle(cornerRadius: row ? 10 : 6)
                     .stroke(accent.opacity(borderless ? 0 : (pressed ? 0.95 : (hovered && enabled ? 0.7 : 0.25))), lineWidth: pressed ? 1.5 : 1))
@@ -88,6 +88,8 @@ struct CursorPreview: View {
     var hotspot: [Double]?
     var mark = false
     var update: (([Double]) -> Void)?
+    /// Single-click picking (magic wand) instead of dragging the hotspot.
+    var pick: (([Double]) -> Void)?
     var body: some View {
         let info = asset.info
         let maximum = info.aligned_canvas_px.max()!
@@ -108,14 +110,17 @@ struct CursorPreview: View {
                 }
             }.frame(width: w, height: h).contentShape(Rectangle())
                 .gesture(DragGesture(minimumDistance: 0).onChanged { value in
+                    guard pick == nil else { return }
                     update?([min(0.999999, max(0, value.location.x / w)), min(0.999999, max(0, value.location.y / h))])
+                }.onEnded { value in
+                    pick?([min(1, max(0, value.location.x / w)), min(1, max(0, value.location.y / h))])
                 })
         }
     }
 }
 
 struct ContentView: View {
-    @StateObject var studio = Studio()
+    @ObservedObject var studio: Studio
     @State var path = ""
     @State var targeted = false
     @State var showHotspot = true
@@ -131,11 +136,14 @@ struct ContentView: View {
                     if let slot = studio.slot { editor(slot) }
                 }
                 footer
-            }.padding(26).frame(maxWidth: .infinity, maxHeight: .infinity).background(Color(red: 0.98, green: 0.98, blue: 0.97))
-        }.foregroundStyle(ink).tint(accent).preferredColorScheme(.light)
+            }.padding(26).frame(maxWidth: .infinity, maxHeight: .infinity).background(canvas)
+        }.foregroundStyle(ink).tint(accent)
             .frame(minWidth: 1060, minHeight: 780)
             .disabled(studio.busy || !studio.ready)
             .overlay { if studio.busy { VStack(spacing: 12) { ProgressView(); Text(studio.t("processing")) }.padding(28).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18)) } }
+            .sheet(isPresented: Binding(get: { studio.timeline != nil }, set: { if !$0 { studio.timeline = nil } })) {
+                TimelineSheet(studio: studio, frames: studio.timeline ?? [])
+            }
             .alert(studio.t("errorTitle"), isPresented: Binding(get: { studio.error != nil }, set: { if !$0 { studio.error = nil } })) {
                 Button(studio.t("ok")) { studio.error = nil }
             } message: { Text(studio.t("errorDetail") + "\n\n" + (studio.error ?? "")) }
@@ -143,52 +151,98 @@ struct ContentView: View {
                 Button(studio.t("cancel"), role: .cancel) {}
                 Button(studio.t("delete"), role: .destructive) { studio.remove() }
             } message: { Text(studio.t("deleteMessage")) }
-            .onChange(of: studio.role) { path = "" }
-            .onChange(of: studio.library.selected) { path = "" }
+            // Don't start with the caret in the theme name: keystrokes typed
+            // while the app launches would silently rename the theme.
+            .onAppear { DispatchQueue.main.async { NSApp.windows.forEach { $0.makeFirstResponder(nil) } } }
+            .onChange(of: studio.ready) { if studio.ready { DispatchQueue.main.async { NSApp.windows.forEach { $0.makeFirstResponder(nil) } } } }
+            .onChange(of: studio.role) { path = ""; studio.wandActive = false }
+            .onChange(of: studio.library.selected) { path = ""; studio.wandActive = false }
     }
     var sidebar: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 0) {
+            // Brand
             HStack(spacing: 10) {
-                Image(systemName: "cursorarrow.rays").font(.title).foregroundStyle(accent)
-                Text("AniOnMac").font(.title3.bold())
-            }.padding(.top, 14)
-            Text(studio.t("myThemes")).font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                Image(systemName: "cursorarrow.rays").font(.title2).foregroundStyle(accent)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("AniOnMac").font(.title3.bold())
+                    Text("v" + studio.appVersion).font(.caption2).foregroundStyle(.secondary).monospacedDigit()
+                }
+            }.padding(.top, 14).padding(.bottom, 18)
+
+            // Theme list
+            HStack(spacing: 6) {
+                Text(studio.t("myThemes")).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Text("\(studio.library.profiles.count)").font(.caption2.weight(.semibold)).monospacedDigit()
+                    .padding(.horizontal, 6).padding(.vertical, 1).background(apricot.opacity(0.7), in: Capsule())
+                Spacer()
+                // Theme actions grouped like a Finder sidebar toolbar.
+                HStack(spacing: 0) {
+                    themeAction("plus", studio.t("addTheme")) { studio.add(copy: false) }
+                    Divider().frame(height: 14)
+                    themeAction("plus.square.on.square", studio.t("duplicate")) { studio.add(copy: true) }
+                    Divider().frame(height: 14)
+                    themeAction("trash", studio.t("delete")) { confirmDelete = true }.disabled(studio.library.profiles.count < 2)
+                }.background(surface, in: Capsule()).overlay(Capsule().stroke(accent.opacity(0.25)))
+            }.padding(.bottom, 10)
             ScrollView {
-                VStack(spacing: 8) {
-                    ForEach(studio.library.profiles) { p in themeRow(p) }
+                VStack(spacing: 6) {
+                    ForEach(Array(studio.library.profiles.enumerated()), id: \.element.id) { index, p in themeRow(p, number: index + 1) }
                 }
             }
-            Button { studio.add(copy: false) } label: { Label(studio.t("addTheme"), systemImage: "plus").frame(maxWidth: .infinity) }.buttonStyle(SmallActionStyle()).controlSize(.large)
-            HStack {
-                Button(studio.t("duplicate")) { studio.add(copy: true) }.buttonStyle(SmallActionStyle())
-                Spacer()
-                Button { confirmDelete = true } label: { Image(systemName: "trash") }.buttonStyle(SmallActionStyle())
-                    .disabled(studio.library.profiles.count < 2).help(studio.t("delete"))
-            }
-            Divider()
-            Button { studio.restoreNative() } label: {
-                Label(studio.t("nativeReset"), systemImage: "arrow.counterclockwise.circle")
-                    .font(.system(size: 12, weight: .medium)).frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12).contentShape(Rectangle())
-            }.buttonStyle(SmallActionStyle(row: true))
-            Divider()
-            Label(studio.t("autoSave"), systemImage: "checkmark.circle").modifier(SecondaryCopy())
-            Text(studio.t("copyHint")).modifier(SecondaryCopy()).fixedSize(horizontal: false, vertical: true)
-        }.padding(20).frame(width: 210).frame(maxHeight: .infinity).background(cream)
+
+            Divider().padding(.vertical, 14)
+
+            // Footer
+            VStack(alignment: .leading, spacing: 8) {
+                Label(studio.t("autoSave"), systemImage: "checkmark.circle").modifier(SecondaryCopy())
+                    .help(studio.t("copyHint").replacingOccurrences(of: "\n", with: "，"))
+                HStack(spacing: 6) {
+                    Button(studio.t("aboutShort")) { showAbout(studio) }.buttonStyle(.link)
+                    Text("·").foregroundStyle(.secondary)
+                    Link(destination: projectURL) { Text("GitHub") }.help(studio.t("authorLine") + " · " + projectURL.absoluteString)
+                    Text("·").foregroundStyle(.secondary)
+                    Button { studio.checkForUpdates() } label: {
+                        Label(studio.t("checkUpdates"), systemImage: "arrow.triangle.2.circlepath")
+                    }.buttonStyle(.link).disabled(studio.checkingUpdates)
+                }.font(.system(size: 11)).tint(accent).lineLimit(1)
+            }.padding(.top, 14)
+        }.padding(.horizontal, 16).padding(.bottom, 16).frame(width: 248).frame(maxHeight: .infinity).background(cream)
     }
-    func themeRow(_ p: Profile) -> some View {
-        Button { studio.select(p.id) } label: {
-            HStack(spacing: 10) {
-                if let slot = p.slots.first(where: { !$0.preview.isEmpty }), let asset = studio.cache[slot.preview] {
-                    CursorPreview(asset: asset, size: 28).allowsHitTesting(false).frame(width: 34, height: 34)
-                } else { Image(systemName: "cursorarrow").frame(width: 34, height: 34) }
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(p.name.isEmpty ? studio.t("untitled") : p.name).font(.system(size: 13, weight: .semibold)).lineLimit(2)
-                    Text("\(p.slots.filter { !$0.asset.isEmpty }.count) / 4 · " + studio.t("modes")).modifier(SecondaryCopy())
+    func themeAction(_ symbol: String, _ label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol).font(.system(size: 11, weight: .semibold)).frame(width: 26, height: 22).contentShape(Rectangle())
+                .accessibilityLabel(label)
+        }.buttonStyle(.borderless).foregroundStyle(accent).help(label)
+    }
+    func themeRow(_ p: Profile, number: Int) -> some View {
+        let selected = p.id == studio.library.selected
+        let inUse = p.id == studio.library.inUse
+        let filled = p.slots.filter { !$0.asset.isEmpty }.count
+        return Button { studio.select(p.id) } label: {
+            HStack(spacing: 9) {
+                Text(String(format: "%02d", number)).font(.system(size: 10, weight: .bold, design: .rounded)).monospacedDigit()
+                    .foregroundStyle(selected ? accent : Color.secondary).frame(width: 18)
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8).fill(surface.opacity(0.9))
+                    if let slot = p.slots.first(where: { !$0.preview.isEmpty }), let asset = studio.cache[slot.preview] {
+                        CursorPreview(asset: asset, size: 24).allowsHitTesting(false)
+                    } else { Image(systemName: "cursorarrow").foregroundStyle(.secondary) }
+                }.frame(width: 34, height: 34)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 5) {
+                        Text(p.name.isEmpty ? studio.t("untitled") : p.name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                        if inUse {
+                            Text(studio.t("inUse")).font(.system(size: 9, weight: .bold)).foregroundStyle(onAccent).lineLimit(1).fixedSize()
+                                .padding(.horizontal, 5).padding(.vertical, 1).background(accent, in: Capsule())
+                                .accessibilityLabel(studio.t("inUse"))
+                        }
+                    }
+                    Text("\(filled) / 4 · " + studio.t("modes")).modifier(SecondaryCopy()).lineLimit(1)
                 }
                 Spacer(minLength: 0)
-            }.padding(10).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-        }.buttonStyle(SmallActionStyle(row: true, selected: p.id == studio.library.selected, borderless: true)).frame(maxWidth: .infinity)
+            }.padding(.vertical, 8).padding(.horizontal, 8).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+        }.buttonStyle(SmallActionStyle(row: true, selected: selected, borderless: true)).frame(maxWidth: .infinity)
+            .help(inUse ? studio.t("inUseHint") : "")
     }
     var header: some View {
         HStack(alignment: .top) {
@@ -197,7 +251,23 @@ struct ContentView: View {
                     .font(.system(size: 26, weight: .semibold)).textFieldStyle(.plain).accessibilityLabel(studio.t("themeName"))
                 Text(studio.t("subtitle")).font(.callout).foregroundStyle(.secondary)
             }
-            Button(studio.library.english ? "中文版" : "English version") { studio.toggleLanguage() }.buttonStyle(SmallActionStyle())
+            HStack(spacing: 8) {
+                Menu {
+                    Picker(studio.t("appearance"), selection: Binding(get: { studio.library.appearance }, set: { studio.setAppearance($0) })) {
+                        ForEach(appearanceModes, id: \.self) { mode in Text(studio.t("appearance_" + mode)).tag(mode) }
+                    }.pickerStyle(.inline).labelsHidden()
+                } label: {
+                    Label(studio.t("appearance_" + studio.library.appearance), systemImage: "circle.lefthalf.filled")
+                }.menuStyle(.borderlessButton).fixedSize().help(studio.t("appearance"))
+                Menu {
+                    Picker(studio.t("language"), selection: Binding(get: { studio.library.language }, set: { studio.setLanguage($0) })) {
+                        Text(studio.t("languageSystem")).tag("system")
+                        ForEach(studio.languages, id: \.code) { lang in Text(lang.name).tag(lang.code) }
+                    }.pickerStyle(.inline).labelsHidden()
+                } label: {
+                    Label(studio.library.language == "system" ? studio.t("languageSystem") : studio.t("languageName"), systemImage: "globe")
+                }.menuStyle(.borderlessButton).fixedSize().help(studio.t("language"))
+            }
         }
     }
     var rolePicker: some View {
@@ -244,27 +314,68 @@ struct ContentView: View {
                 }.buttonStyle(SmallActionStyle()).font(.caption)
                 Divider()
                 hotspotEditor(slot)
+                Divider()
+                backgroundEditor(slot)
                 if slot.role == "pointing" { Text(studio.t("pointingHint")).modifier(SecondaryCopy()) }
             }.frame(maxWidth: .infinity)
             previewPanel(slot).frame(maxWidth: .infinity)
-        }.padding(22).background(Color.white.opacity(0.7), in: RoundedRectangle(cornerRadius: 18))
+        }.padding(22).background(surface.opacity(0.7), in: RoundedRectangle(cornerRadius: 18))
     }
     func dropZone(_ slot: Slot) -> some View {
         VStack(spacing: 9) {
             Image(systemName: "square.and.arrow.down").font(.system(size: 25, weight: .light)).foregroundStyle(accent)
             Text(studio.t("dropHint")).font(.system(size: 14, weight: .medium))
             Text(slot.filename.isEmpty ? studio.t("animationHint") : slot.filename).modifier(SecondaryCopy()).lineLimit(2)
-            Button(studio.t("chooseFile")) { studio.chooseFile() }.buttonStyle(SmallActionStyle()).controlSize(.large)
-        }.frame(maxWidth: .infinity).frame(height: 155).background(targeted ? apricot.opacity(0.6) : cream, in: RoundedRectangle(cornerRadius: 14))
+            HStack(spacing: 10) {
+                Button(studio.t("chooseFile")) { studio.chooseFile() }.buttonStyle(SmallActionStyle()).controlSize(.large)
+                Picker(studio.t("frameInterval"), selection: $studio.frameInterval) {
+                    ForEach(Studio.frameIntervals, id: \.self) { ms in Text("\(ms) ms").tag(ms) }
+                }.pickerStyle(.menu).fixedSize().font(.caption).help(studio.t("frameIntervalHint"))
+            }
+        }.frame(maxWidth: .infinity).frame(height: 170).background(targeted ? apricot.opacity(0.6) : cream, in: RoundedRectangle(cornerRadius: 14))
             .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(accent.opacity(0.3), style: StrokeStyle(lineWidth: 1, dash: [5, 5])))
             .onDrop(of: [UTType.fileURL], isTargeted: $targeted) { providers in
-                guard let provider = providers.first else { return false }
-                provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
-                    let url: URL? = (item as? URL) ?? (item as? Data).flatMap { URL(dataRepresentation: $0, relativeTo: nil) }
-                    if let url { Task { @MainActor in studio.importFile(url) } }
+                guard !providers.isEmpty else { return false }
+                // Collect every dropped file, then import once: one .ani, or images/folders as frames.
+                let group = DispatchGroup()
+                let lock = NSLock()
+                var urls: [URL] = []
+                for provider in providers {
+                    group.enter()
+                    provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+                        let url: URL? = (item as? URL) ?? (item as? Data).flatMap { URL(dataRepresentation: $0, relativeTo: nil) }
+                        if let url { lock.lock(); urls.append(url); lock.unlock() }
+                        group.leave()
+                    }
                 }
+                group.notify(queue: .main) { let dropped = urls; Task { @MainActor in studio.importItems(dropped) } }
                 return true
             }
+    }
+    func backgroundEditor(_ slot: Slot) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(studio.t("backgroundHeading")).font(.caption.weight(.semibold)).foregroundStyle(accent)
+                Spacer()
+                if slot.originalAsset != nil {
+                    Button(studio.t("restoreOriginal")) { studio.restoreOriginal() }.buttonStyle(SmallActionStyle()).font(.caption)
+                }
+            }
+            HStack(spacing: 10) {
+                Button { studio.wandActive = false; studio.knockout(mode: "auto") } label: {
+                    Label(studio.t("autoRemove"), systemImage: "person.crop.rectangle")
+                }.buttonStyle(SmallActionStyle())
+                Button { studio.wandActive.toggle() } label: {
+                    Label(studio.t("magicWand"), systemImage: "wand.and.stars")
+                }.buttonStyle(SmallActionStyle(selected: studio.wandActive))
+            }.font(.caption).disabled(slot.asset.isEmpty)
+            HStack(spacing: 8) {
+                Text(studio.t("tolerance")).font(.caption)
+                Slider(value: $studio.wandTolerance, in: 8...160, step: 1).accessibilityLabel(studio.t("tolerance"))
+                Text("\(Int(studio.wandTolerance))").font(.caption).monospacedDigit().frame(width: 28, alignment: .trailing)
+            }.disabled(slot.asset.isEmpty)
+            Text(studio.t(studio.wandActive ? "wandActiveHint" : "backgroundHint")).modifier(SecondaryCopy()).fixedSize(horizontal: false, vertical: true)
+        }
     }
     func hotspotEditor(_ slot: Slot) -> some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -299,9 +410,17 @@ struct ContentView: View {
                 Text(studio.t("actualSize")).font(.caption).foregroundStyle(accent).padding(7).background(cream, in: Capsule())
             }
             ZStack {
-                RoundedRectangle(cornerRadius: 16).fill(Color.white)
+                RoundedRectangle(cornerRadius: 16).fill(surface)
+                if studio.wandActive { Checkerboard().clipShape(RoundedRectangle(cornerRadius: 16)) }
                 if let asset = studio.cache[slot.preview] {
-                    CursorPreview(asset: asset, size: slot.size, hotspot: studio.hotNormalized(slot), mark: showHotspot, update: { studio.setHotspot($0) })
+                    if studio.wandActive {
+                        // Enlarged so a colour can be picked precisely; transparency shows as a checkerboard.
+                        CursorPreview(asset: asset, size: 240, hotspot: studio.hotNormalized(slot), mark: false,
+                                      pick: { studio.knockout(mode: "wand", point: $0) })
+                            .onHover { inside in if inside { NSCursor.crosshair.push() } else { NSCursor.pop() } }
+                    } else {
+                        CursorPreview(asset: asset, size: slot.size, hotspot: studio.hotNormalized(slot), mark: showHotspot, update: { studio.setHotspot($0) })
+                    }
                 } else { Text(studio.t("noCursor")).font(.callout).foregroundStyle(.secondary) }
             }.frame(height: 310).overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.gray.opacity(0.12)))
             Toggle(studio.t("showHotspot"), isOn: $showHotspot).toggleStyle(.checkbox).font(.caption)
@@ -312,21 +431,171 @@ struct ContentView: View {
         var input = path.trimmingCharacters(in: .whitespacesAndNewlines)
         if input.hasPrefix("\"") && input.hasSuffix("\"") { input = String(input.dropFirst().dropLast()) }
         let url = input.hasPrefix("file://") ? URL(string: input) : URL(fileURLWithPath: (input as NSString).expandingTildeInPath)
-        if let url { studio.importFile(url) }
+        if let url { studio.importItems([url]) }
     }
+    /// Bottom toolbar: status on the left, every system-level action grouped on the right.
     var footer: some View {
-        HStack(spacing: 14) {
-            Text(studio.t(studio.status)).modifier(SecondaryCopy()).frame(maxWidth: .infinity, alignment: .leading).fixedSize(horizontal: false, vertical: true)
-            Button(studio.t("undo")) { studio.restore() }.buttonStyle(SmallActionStyle()).disabled(!studio.canUndo).controlSize(.large)
-            Button { studio.apply() } label: { Label(studio.t(studio.isApplied ? "alreadyApplied" : "apply"), systemImage: "checkmark").padding(.horizontal, 8) }
-                .buttonStyle(SmallActionStyle(primary: true)).controlSize(.large).disabled(!studio.canApply)
+        VStack(spacing: 12) {
+            Divider()
+            HStack(spacing: 10) {
+                Image(systemName: statusSymbol).foregroundStyle(statusSymbol == "exclamationmark.triangle.fill" ? Color.orange : accent)
+                    .font(.system(size: 13)).accessibilityHidden(true)
+                Text(studio.t(studio.status)).font(.system(size: 12)).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading).lineLimit(2)
+                Button { studio.restoreNative() } label: { Label(studio.t("nativeReset"), systemImage: "arrow.counterclockwise.circle").padding(.horizontal, 4) }
+                    .buttonStyle(SmallActionStyle()).help(studio.t("nativeHint"))
+                Button { studio.restore() } label: { Label(studio.t("undo"), systemImage: "arrow.uturn.backward").padding(.horizontal, 4) }
+                    .buttonStyle(SmallActionStyle()).disabled(!studio.canUndo)
+                Button { studio.apply() } label: { Label(studio.t(studio.isApplied ? "alreadyApplied" : "apply"), systemImage: "checkmark").padding(.horizontal, 10) }
+                    .buttonStyle(SmallActionStyle(primary: true)).disabled(!studio.canApply)
+                    .keyboardShortcut(.return, modifiers: .command)
+            }.controlSize(.large)
+        }
+    }
+    var statusSymbol: String {
+        switch studio.status {
+        case "applyFailed", "loadFailed", "refreshWarning", "nothingRemoved": return "exclamationmark.triangle.fill"
+        case "applied", "alreadyApplied", "nativeRestored", "imported", "backgroundRemoved", "restored", "originalRestored": return "checkmark.circle.fill"
+        default: return "info.circle"
         }
     }
 }
 
+
+@MainActor func showAbout(_ studio: Studio) {
+    let body = NSMutableParagraphStyle(); body.alignment = .center; body.paragraphSpacing = 6
+    let text = NSMutableAttributedString()
+    let plain: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.labelColor, .paragraphStyle: body]
+    text.append(NSAttributedString(string: studio.t("aboutDescription") + "\n", attributes: plain))
+    text.append(NSAttributedString(string: studio.t("authorLine") + "\n", attributes: plain))
+    text.append(NSAttributedString(string: projectURL.absoluteString, attributes: plain.merging([.link: projectURL]) { $1 }))
+    NSApp.orderFrontStandardAboutPanel(options: [.credits: text])
+    NSApp.activate(ignoringOtherApps: true)
+}
+
 @main struct CursorApp: App {
+    @StateObject var studio = Studio()
     var body: some Scene {
-        Window("AniOnMac", id: "main") { ContentView() }.defaultSize(width: 1160, height: 900)
-            .commands { CommandGroup(replacing: .newItem) {} }
+        Window("AniOnMac", id: "main") { ContentView(studio: studio) }.defaultSize(width: 1160, height: 900)
+            .commands {
+                CommandGroup(replacing: .newItem) {}
+                CommandGroup(replacing: .appInfo) {
+                    Button(studio.t("about")) { showAbout(studio) }
+                    Button(studio.t("checkUpdates") + "…") { studio.checkForUpdates() }.disabled(studio.checkingUpdates)
+                }
+                CommandGroup(replacing: .help) { Link(studio.t("projectPage"), destination: projectURL) }
+            }
     }
+}
+
+/// Transparency checkerboard shown behind the enlarged preview while removing backgrounds.
+struct Checkerboard: View {
+    var body: some View {
+        Canvas { context, size in
+            let cell: CGFloat = 10
+            for row in 0..<Int(size.height / cell) + 1 {
+                for column in 0..<Int(size.width / cell) + 1 where (row + column) % 2 == 0 {
+                    context.fill(Path(CGRect(x: CGFloat(column) * cell, y: CGFloat(row) * cell, width: cell, height: cell)), with: .color(.gray.opacity(0.18)))
+                }
+            }
+        }
+    }
+}
+
+/// Timeline for several still images: check the order (filename 1, 2, 3… by default),
+/// drag or nudge frames to reorder, drop unwanted ones, preview, then build the animation.
+struct TimelineSheet: View {
+    @ObservedObject var studio: Studio
+    @State var frames: [URL]
+    @State private var dragging: URL?
+    private let thumbs: [URL: NSImage]
+
+    init(studio: Studio, frames: [URL]) {
+        self.studio = studio
+        _frames = State(initialValue: frames)
+        thumbs = Dictionary(uniqueKeysWithValues: frames.map { ($0, NSImage(contentsOf: $0) ?? NSImage()) })
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(studio.t("timelineTitle")).font(.title3.weight(.semibold))
+                Spacer()
+                Text("\(frames.count) / 24 " + studio.t("frames")).monospacedDigit()
+                    .foregroundStyle(frames.count > 24 ? Color.red : .secondary)
+            }
+            Text(studio.t("timelineHint")).modifier(SecondaryCopy()).fixedSize(horizontal: false, vertical: true)
+            HStack(alignment: .top, spacing: 18) {
+                ScrollView(.horizontal) {
+                    HStack(spacing: 10) {
+                        ForEach(Array(frames.enumerated()), id: \.element) { index, url in frameCard(index, url) }
+                    }.padding(4)
+                }.frame(height: 150)
+                VStack(spacing: 8) {
+                    ZStack {
+                        Checkerboard().clipShape(RoundedRectangle(cornerRadius: 12))
+                        TimelineView(.animation(minimumInterval: Double(studio.frameInterval) / 1000)) { context in
+                            let step = frames.isEmpty ? 0 : Int(context.date.timeIntervalSinceReferenceDate * 1000 / Double(studio.frameInterval)) % frames.count
+                            if !frames.isEmpty, let image = thumbs[frames[step]] { Image(nsImage: image).resizable().interpolation(.high).scaledToFit().padding(10) }
+                        }
+                    }.frame(width: 130, height: 130).overlay(RoundedRectangle(cornerRadius: 12).stroke(accent.opacity(0.25)))
+                    Text(studio.t("preview")).modifier(SecondaryCopy())
+                }
+            }
+            HStack(spacing: 10) {
+                Button(studio.t("sortByName")) { frames = Studio.imageFrames(frames) }.buttonStyle(SmallActionStyle())
+                Button(studio.t("reverseOrder")) { frames.reverse() }.buttonStyle(SmallActionStyle())
+                Picker(studio.t("frameInterval"), selection: $studio.frameInterval) {
+                    ForEach(Studio.frameIntervals, id: \.self) { ms in Text("\(ms) ms").tag(ms) }
+                }.pickerStyle(.menu).fixedSize()
+                Spacer()
+                Button(studio.t("cancel")) { studio.timeline = nil }.buttonStyle(SmallActionStyle()).keyboardShortcut(.cancelAction)
+                Button(studio.t("createAnimation")) {
+                    let chosen = frames
+                    studio.timeline = nil
+                    studio.importFrames(chosen)
+                }.buttonStyle(SmallActionStyle(primary: true)).keyboardShortcut(.defaultAction)
+                    .disabled(frames.isEmpty || frames.count > 24)
+            }.font(.caption)
+        }.padding(22).frame(width: 760).background(canvas).foregroundStyle(ink).tint(accent)
+    }
+
+    func frameCard(_ index: Int, _ url: URL) -> some View {
+        VStack(spacing: 6) {
+            ZStack(alignment: .topLeading) {
+                Checkerboard().clipShape(RoundedRectangle(cornerRadius: 10))
+                if let image = thumbs[url] { Image(nsImage: image).resizable().interpolation(.high).scaledToFit().padding(6) }
+                Text("\(index + 1)").font(.caption2.weight(.bold)).monospacedDigit().foregroundStyle(onAccent)
+                    .padding(.horizontal, 6).padding(.vertical, 2).background(accent, in: Capsule()).padding(4)
+            }.frame(width: 84, height: 84)
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(accent.opacity(0.2)))
+            Text(url.lastPathComponent).font(.caption2).lineLimit(1).truncationMode(.middle).frame(width: 84)
+            HStack(spacing: 4) {
+                Button { move(index, by: -1) } label: { Image(systemName: "chevron.left").accessibilityLabel(studio.t("moveEarlier")) }.disabled(index == 0).help(studio.t("moveEarlier"))
+                Button { frames.remove(at: index) } label: { Image(systemName: "xmark").accessibilityLabel(studio.t("removeFrame")) }.help(studio.t("removeFrame"))
+                Button { move(index, by: 1) } label: { Image(systemName: "chevron.right").accessibilityLabel(studio.t("moveLater")) }.disabled(index == frames.count - 1).help(studio.t("moveLater"))
+            }.buttonStyle(.borderless).font(.caption2)
+        }
+        .onDrag { dragging = url; return NSItemProvider(object: url.absoluteString as NSString) }
+        .onDrop(of: [.text], delegate: FrameDrop(target: url, frames: $frames, dragging: $dragging))
+    }
+
+    func move(_ index: Int, by offset: Int) {
+        let target = index + offset
+        guard frames.indices.contains(target) else { return }
+        frames.swapAt(index, target)
+    }
+}
+
+/// Live reordering while a frame card is dragged across the timeline.
+struct FrameDrop: DropDelegate {
+    let target: URL
+    @Binding var frames: [URL]
+    @Binding var dragging: URL?
+    func dropEntered(info: DropInfo) {
+        guard let dragging, dragging != target, let from = frames.firstIndex(of: dragging), let to = frames.firstIndex(of: target) else { return }
+        withAnimation(.easeOut(duration: 0.12)) { frames.move(fromOffsets: IndexSet(integer: from), toOffset: to > from ? to + 1 : to) }
+    }
+    func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: .move) }
+    func performDrop(info: DropInfo) -> Bool { dragging = nil; return true }
 }

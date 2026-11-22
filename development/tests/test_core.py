@@ -103,12 +103,58 @@ class NativeTests(unittest.TestCase):
         config.write_text(json.dumps(dict(slots=[dict(role='arrow', path=str(self.source), size=32, hotspot=[1, 0])])))
         self.run_core('export', config, self.path / 'bad', ok=False)
 
+    def test_compose_images_into_ani(self):
+        frames = []
+        for i, hot in enumerate([(0, 0), (1, 1), (2, 2)], start=1):
+            path = self.path / f'{i}.png'
+            path.write_bytes(cur(hot)[22:])  # the PNG payload of a 4x4 test frame
+            frames.append(str(path))
+        config = self.path / 'compose.json'
+        config.write_text(json.dumps({'images': frames, 'jiffies': 6, 'hotspot': [0.5, 0.5]}))
+        out = self.run_core('compose', config, self.path / 'built.ani')
+        self.assertEqual(out['frames'], 3)
+        self.assertEqual(out['canvas_px'], [4, 4])
+        meta = self.run_core('preview', self.path / 'built.ani', self.path / 'built-preview')
+        self.assertEqual(meta['playback_frames'], [0, 1, 2])
+        self.assertAlmostEqual(meta['frame_duration_seconds'], .1)
+        self.assertEqual(meta['hotspot_points'], [64, 64])
+        config.write_text(json.dumps({'images': frames * 9}))
+        self.run_core('compose', config, self.path / 'too-many.ani', ok=False)
+
+    def test_knockout_keeps_timing_and_hotspot(self):
+        # sample.ani has a custom sequence/rate; the magic wand must keep both.
+        config = self.path / 'wand.json'
+        # The red hotspot pixel of both frames lands at the centre of the aligned 5x5 canvas.
+        config.write_text(json.dumps({'mode': 'wand', 'point': [0.5, 0.5], 'tolerance': 40}))
+        out = self.run_core('knockout', self.source, config, self.path / 'wand.ani')
+        self.assertEqual(out['removed_pixels'], 2)
+        config.write_text(json.dumps({'mode': 'wand', 'point': [0.0, 0.0], 'tolerance': 40}))
+        self.assertEqual(self.run_core('knockout', self.source, config, self.path / 'clear.ani')['removed_pixels'], 0)
+        config.write_text(json.dumps({'mode': 'wand', 'point': [0.5, 0.5], 'tolerance': 40}))
+        before = self.run_core('preview', self.source, self.path / 'before')
+        after = self.run_core('preview', self.path / 'wand.ani', self.path / 'after')
+        for key in ('playback_frames', 'hotspot_points', 'aligned_canvas_px'):
+            self.assertEqual(before[key], after[key], key)
+        self.assertAlmostEqual(before['frame_duration_seconds'], after['frame_duration_seconds'])
+        config.write_text(json.dumps({'mode': 'wand'}))
+        self.run_core('knockout', self.source, config, self.path / 'nopoint.ani', ok=False)
+        config.write_text(json.dumps({'mode': 'erase'}))
+        self.run_core('knockout', self.source, config, self.path / 'badmode.ani', ok=False)
+
     def test_translation_parity_and_no_chinese_full_stops(self):
         resources = ROOT / 'development/resources'
         zh = json.loads((resources / 'zh-Hant.json').read_text())
         en = json.loads((resources / 'en.json').read_text())
         self.assertEqual(set(zh), set(en))
         self.assertTrue(all('。' not in value for value in zh.values()))
+        names = {}
+        for path in resources.glob('*.json'):
+            table = json.loads(path.read_text())
+            self.assertEqual(set(table), set(en), path.name)
+            self.assertTrue(table['languageName'], path.name)
+            names[path.stem] = table['languageName']
+        self.assertTrue({'zh-Hant', 'en', 'ja', 'ko'} <= set(names))
+        self.assertEqual(names['zh-Hant'], '繁體中文（臺灣）')
 
     def test_native_defaults_are_not_custom_backup(self):
         output = self.path / 'native.cape'

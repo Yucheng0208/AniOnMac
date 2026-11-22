@@ -16,12 +16,23 @@ for tool in anicore cursorctl; do
   codesign --force --sign - "$app/Contents/Resources/$tool"
 done
 cp development/resources/*.json "$app/Contents/Resources/"
+# One .lproj per bundled language so AppKit localizes the system menus
+# (Edit, View, Window, Help…) instead of falling back to English.
+for json in development/resources/*.json; do
+  lang=$(basename "$json" .json)
+  mkdir -p "$app/Contents/Resources/$lang.lproj"
+  printf '"CFBundleDisplayName" = "AniOnMac";\n"CFBundleName" = "AniOnMac";\n' > "$app/Contents/Resources/$lang.lproj/InfoPlist.strings"
+done
 cp development/resources/AppIcon.icns "$app/Contents/Resources/"
+commit=$(git rev-parse HEAD 2>/dev/null || true)
+commit_date=$(git log -1 --format=%cI 2>/dev/null || true)
+export commit commit_date
 python3 - <<'PY'
-import plistlib
+import plistlib, os
 from pathlib import Path
 p=Path('AniOnMac.app/Contents/Info.plist')
-p.write_bytes(plistlib.dumps(dict(CFBundleExecutable='AniOnMac',CFBundleIdentifier='io.anionmac.app',CFBundleName='AniOnMac',CFBundleDisplayName='AniOnMac',CFBundleIconFile='AppIcon',CFBundlePackageType='APPL',CFBundleShortVersionString='0.1.1',CFBundleVersion='4',LSMinimumSystemVersion='14.0',NSHighResolutionCapable=True)))
+langs=sorted(x.stem for x in Path('development/resources').glob('*.json'))
+p.write_bytes(plistlib.dumps(dict(CFBundleDevelopmentRegion='en',CFBundleLocalizations=langs,CFBundleAllowMixedLocalizations=True,CFBundleExecutable='AniOnMac',CFBundleIdentifier='io.anionmac.app',CFBundleName='AniOnMac',CFBundleDisplayName='AniOnMac',CFBundleIconFile='AppIcon',CFBundlePackageType='APPL',CFBundleShortVersionString='0.1.1',CFBundleVersion='4',NSHumanReadableCopyright='© lx3211 · https://github.com/lx3211/AniOnMac',AniOnMacCommit=os.environ.get('commit',''),AniOnMacCommitDate=os.environ.get('commit_date',''),LSMinimumSystemVersion='14.0',NSHighResolutionCapable=True)))
 PY
 codesign --force --sign - "$app"
 codesign --verify --deep --strict "$app"
