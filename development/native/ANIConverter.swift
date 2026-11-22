@@ -120,8 +120,16 @@ func convert(_ source: URL, to output: URL, size: Double, hotspot: [Double]? = n
     }
     let tick = ani.rates.reduce(0, gcd)
     let total = ani.rates.reduce(0) { $0 + $1 / tick }
-    try require(total <= 24, "This macOS cursor backend supports at most 24 animation steps; exact ANI timing would exceed that limit")
-    let playback = zip(ani.sequence, ani.rates).flatMap { Array(repeating: $0.0, count: $0.1 / tick) }
+    try require(total <= 25, "This version of AniOnMac accepts at most 25 animation steps; preserving this ANI timing would exceed that limit")
+    var playback = zip(ani.sequence, ani.rates).flatMap { Array(repeating: $0.0, count: $0.1 / tick) }
+    // 25-step registration fails on the tested WindowServer. Prefer removing
+    // an adjacent duplicate; otherwise resample by omitting the last step.
+    if playback.count == 25 {
+        let repeated = (1..<playback.count).first { playback[$0] == playback[$0 - 1] }
+        playback.remove(at: repeated ?? (playback.count - 1))
+    }
+    let outputSteps = playback.count
+    let frameDuration = Double(tick * total) / 60 / Double(outputSteps)
     try require(!FileManager.default.fileExists(atPath: output.path), "Output folder already exists")
     try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
     var aligned: [CGImage] = []
@@ -135,14 +143,14 @@ func convert(_ source: URL, to output: URL, size: Double, hotspot: [Double]? = n
     var reps: [Data] = []
     for density in [1, 2] {
         let w = max(1, Int((points[0] * Double(density)).rounded())), h = max(1, Int((points[1] * Double(density)).rounded()))
-        let context = try canvas(w, h * total)
+        let context = try canvas(w, h * outputSteps)
         for (step, index) in playback.enumerated() {
-            context.draw(aligned[index], in: CGRect(x: 0, y: (total - 1 - step) * h, width: w, height: h))
+            context.draw(aligned[index], in: CGRect(x: 0, y: (outputSteps - 1 - step) * h, width: w, height: h))
         }
         reps.append(try png(context.makeImage()!))
     }
-    let metadata: [String: Any] = ["aligned_canvas_px": [width, height], "hotspot_points": hot, "playback_frames": playback, "frame_duration_seconds": Double(tick) / 60]
-    let cursor: [String: Any] = ["PointsWide": points[0], "PointsHigh": points[1], "HotSpotX": hot[0], "HotSpotY": hot[1], "FrameCount": total, "FrameDuration": Double(tick) / 60, "Representations": reps]
+    let metadata: [String: Any] = ["aligned_canvas_px": [width, height], "hotspot_points": hot, "playback_frames": playback, "frame_duration_seconds": frameDuration, "source_steps": total]
+    let cursor: [String: Any] = ["PointsWide": points[0], "PointsHigh": points[1], "HotSpotX": hot[0], "HotSpotY": hot[1], "FrameCount": outputSteps, "FrameDuration": frameDuration, "Representations": reps]
     return (metadata, cursor)
 }
 

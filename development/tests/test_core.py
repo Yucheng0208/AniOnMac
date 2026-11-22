@@ -69,6 +69,27 @@ class NativeTests(unittest.TestCase):
         self.assertEqual(data['com.apple.coregraphics.Arrow']['HotSpotY'], 48)
         subprocess.run([CTL, 'validate', result['cape']], check=True, capture_output=True)
 
+    def test_25_step_boundary(self):
+        for steps in (25, 26):
+            data = b'ACON' + chunk(b'anih', struct.pack('<9I', 36, 2, steps, 4, 4, 32, 1, 18, 3))
+            sequence = [i % 2 for i in range(steps)]
+            data += chunk(b'seq ', struct.pack('<' + 'I' * steps, *sequence))
+            data += chunk(b'LIST', b'fram' + chunk(b'icon', cur((1, 2))) + chunk(b'icon', cur((2, 1))))
+            self.source.write_bytes(b'RIFF' + struct.pack('<I', len(data)) + data)
+            output = self.path / str(steps)
+            if steps == 26:
+                self.run_core('preview', self.source, output, ok=False)
+                continue
+            meta = self.run_core('preview', self.source, output)
+            self.assertEqual(meta['source_steps'], 25)
+            self.assertEqual(meta['playback_frames'], sequence[:24])
+            self.assertAlmostEqual(meta['frame_duration_seconds'], 0.3125)
+            self.assertAlmostEqual(meta['frame_duration_seconds'] * 24, 7.5)
+            config = self.path / 'config.json'
+            config.write_text(json.dumps(dict(slots=[dict(role='pointing', path=str(self.source), size=32)])))
+            result = self.run_core('export', config, self.path / 'export')
+            subprocess.run([CTL, 'validate', result['cape']], check=True, capture_output=True)
+
     def test_invalid_or_empty_theme(self):
         self.source.write_bytes(ani()[:-1])
         self.run_core('preview', self.source, self.path / 'invalid', ok=False)
