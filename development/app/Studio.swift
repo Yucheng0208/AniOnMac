@@ -426,7 +426,12 @@ func runProcess(_ executable: URL, _ arguments: [String]) async throws -> String
             let alert = NSAlert()
             do {
                 let (releaseCode, release) = try await githubJSON("/releases/latest")
-                if releaseCode == 200, let tag = (release as? [String: Any])?["tag_name"] as? String, Self.isNewer(tag, than: appVersion) {
+                let releaseInfo = releaseCode == 200 ? release as? [String: Any] : nil
+                let releaseTag = releaseInfo?["tag_name"] as? String
+                // When this build *is* the latest release, only pushes after that release count as new.
+                let releaseDate = (releaseTag.map { !Self.isNewer($0, than: appVersion) && !Self.isNewer(appVersion, than: $0) } ?? false)
+                    ? (releaseInfo?["published_at"] as? String).flatMap { ISO8601DateFormatter().date(from: $0) } : nil
+                if let tag = releaseTag, Self.isNewer(tag, than: appVersion) {
                     alert.messageText = t("updateAvailable") + " " + tag
                     alert.informativeText = t("updateCurrent") + " " + appVersion
                     alert.addButton(withTitle: t("updateDownload")); alert.addButton(withTitle: t("cancel"))
@@ -448,7 +453,8 @@ func runProcess(_ executable: URL, _ arguments: [String]) async throws -> String
                     }
                 }
                 // Not comparable (unknown build commit or a commit GitHub doesn't have): fall back to dates.
-                let isNew = behind.map { $0 > 0 } ?? (remoteDate.map { $0 > (buildDate ?? .distantPast) } ?? false)
+                var isNew = behind.map { $0 > 0 } ?? (remoteDate.map { $0 > (buildDate ?? .distantPast) } ?? false)
+                if let releaseDate, let remoteDate, remoteDate <= releaseDate { isNew = false; behind = 0 }
                 let when = remoteDate.map { DateFormatter.localizedString(from: $0, dateStyle: .medium, timeStyle: .short) } ?? dateText
                 if isNew {
                     alert.messageText = t("updatePushes")
