@@ -20,30 +20,52 @@ Import `.ani`, PNG or GIF, remove backgrounds in one click, tune size and hotspo
 
 ---
 
-## ✨ Highlights
+## Highlights
 
 | | |
 | --- | --- |
-| 🎞️ **Any source** | Windows `.ani`, a single PNG / JPG, an animated GIF (also APNG / WebP), or a whole folder of numbered images |
-| 🧭 **Timeline** | Several images open on a timeline — drag to reorder, nudge with ◀ ▶, drop frames, set the frame time, preview live |
-| 🪄 **Background removal** | **Auto** cuts out the subject with macOS Vision; the **magic wand** removes any colour you click |
-| 🎯 **Precise hotspot** | Drag on the 1:1 preview or type X / Y; the animation, timing and hotspot always stay in sync |
-| 🗂️ **Themes** | Unlimited numbered themes with an **In use** tag, auto-save and one-step undo |
-| 🌗 **Light & dark** | Follows the system or pick one; the dark palette is a warm, pudding-inspired brown and custard |
-| 🌐 **4 languages** | 繁體中文（臺灣）, English, 日本語, 한국어 — follows the system by default, menu bar included |
-| 🔄 **Updates** | Checks GitHub for new releases and new pushes |
+| **Any source** | Windows `.ani`, a single PNG / JPG, an animated GIF (also APNG / WebP), or a whole folder of numbered images |
+| **Timeline** | Several images open on a timeline — drag to reorder, nudge with ◀ ▶, drop frames, set the frame time, preview live |
+| **Background removal** | **Auto** cuts out the subject with macOS Vision; the **magic wand** removes any colour you click |
+| **Precise hotspot** | Drag on the 1:1 preview or type X / Y; the animation, timing and hotspot always stay in sync |
+| **Hotspot calibration** | Click five dots with your own cursor; the app measures how far off the tip is and corrects the hotspot for you |
+| **Drawing style** | Per mode: **High-res** (smooth edges), **Pixel** (visible square pixels) or **Jagged** (hard edges like classic pointers) |
+| **Themes** | Unlimited numbered themes with an **In use** tag, auto-save and one-step undo |
+| **Light & dark** | Follows the system or pick one; the dark palette is a warm, pudding-inspired brown and custard |
+| **4 languages** | 繁體中文（臺灣）, English, 日本語, 한국어 — follows the system by default, menu bar included |
+| **Updates** | Checks GitHub for new releases and new pushes |
 
-## 🚀 Quick start
+## Installation
 
-1. Download `AniOnMac-macOS-universal.zip` from [**Releases**](https://github.com/lx3211/AniOnMac/releases/latest), unzip it and open `AniOnMac.app`.
-2. Pick a mode at the top — **Arrow**, **Pointing**, **IBeam** or **Wait**.
-3. Drop in an `.ani`, PNG, GIF or a folder of images.
-4. Adjust size, hotspot and background, then press **Apply theme** (<kbd>⌘</kbd> <kbd>↩</kbd>).
+1. Download **`AniOnMac-macOS-universal.dmg`** from [**Releases**](https://github.com/lx3211/AniOnMac/releases/latest).
+2. Double-click the DMG. In the window that opens, drag **AniOnMac** onto the **Applications** folder.
+3. Eject the disk image: click the eject button next to **AniOnMac** in the Finder sidebar (or drag it to the Trash).
+4. Open **AniOnMac** from **Applications** or Launchpad.
 
-> [!NOTE]
-> The first launch may be blocked by [macOS security](https://support.apple.com/en-us/102445). Open **System Settings → Privacy & Security**, click **Open Anyway**, then **Open**.
+### Allowing the first launch
 
-## 🎨 Making a cursor
+AniOnMac is not notarized by Apple, so macOS blocks it the first time:
+
+1. A message says Apple could not verify AniOnMac. Click **Done** (do not move it to the Trash).
+2. Open **System Settings → Privacy & Security** and scroll down to **Security**.
+3. Next to "AniOnMac was blocked to protect your Mac", click **Open Anyway**.
+4. Confirm with your password or Touch ID, then click **Open Anyway** in the dialog that follows.
+
+From then on AniOnMac opens normally. Apple's own guide: [Open a Mac app from an unknown developer](https://support.apple.com/en-us/102445).
+
+> [!TIP]
+> If macOS says the app **is damaged and can't be opened**, the download is still quarantined. Run this in Terminal, then open the app again:
+> `xattr -dr com.apple.quarantine /Applications/AniOnMac.app`
+
+To update, quit AniOnMac and replace it in **Applications** with the new version; your themes are kept. A ZIP (`AniOnMac-macOS-universal.zip`) is also provided: unzip it and move `AniOnMac.app` to **Applications**, then follow the same steps.
+
+## Quick start
+
+1. Pick a mode at the top: **Arrow**, **Pointing**, **IBeam** or **Wait**.
+2. Drop in an `.ani`, PNG, GIF or a folder of images.
+3. Adjust size, style, hotspot and background, then press **Apply theme** (<kbd>⌘</kbd> <kbd></kbd>).
+
+## Making a cursor
 
 ### From images
 
@@ -65,6 +87,27 @@ Frame order, timing and hotspot are preserved for every source.
 
 <div align="center"><img src="docs/images/background-removal.jpg" width="760" alt="Magic wand background removal"></div>
 
+### Hotspot calibration
+
+The hotspot is the exact point that clicks. If clicks land a little off from the tip you see, press **Calibrate** next to **03 Hotspot**:
+
+1. Inside the calibration area the pointer turns into the cursor you are editing, at its real size.
+2. Put the tip you see on the centre of each dot and click. There are five dots; a click too far from the dot is ignored.
+3. The app averages the offsets (leaving out the one furthest from the rest) and shows the error and the corrected X / Y.
+4. Press **Use this hotspot**, then **Apply theme**.
+
+### Drawing style
+
+Under **02 Size**, each mode has its own style:
+
+| Style | Look |
+| --- | --- |
+| High-res | Smooth scaling with soft, anti-aliased edges (the default) |
+| Pixel | Drawn on a coarse grid (one block is 2 pt), so the square pixels show |
+| Jagged | Smooth inside, but every pixel is either solid or clear, giving stepped edges |
+
+The preview and the calibration cursor show the chosen style exactly as it will be applied.
+
 ### Cursor modes
 
 | Mode | When it shows |
@@ -76,7 +119,7 @@ Frame order, timing and hotspot are preserved for every source.
 
 Only the modes you fill in are applied; the others stay as they are. **Restore macOS appearance** puts all four back to Apple's own artwork at any time.
 
-## 🛠️ Build from source
+## Build from source
 
 ```sh
 xcode-select --install          # Command Line Tools, if not installed yet
@@ -89,7 +132,7 @@ sh development/package.sh       # zips the app for a release
 > If the build stops with `external macro implementation type 'SwiftUIMacros.StateMacro' could not be found`, your Command Line Tools SDK lacks the SwiftUI macro plugin. Install Xcode, or build against an older SDK:
 > `SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk sh development/build.sh`
 
-## <a id="compatibility"></a>🧩 Compatibility
+## <a id="compatibility"></a>Compatibility
 
 | Item | Status |
 | --- | --- |
@@ -100,7 +143,7 @@ sh development/package.sh       # zips the app for a release
 | macOS 26 and later | Uses the ArrowS / IBeamS cursor names |
 | Animation | Up to 24 frames per cursor (WindowServer limit) |
 
-## 💾 Your data
+## Your data
 
 Everything lives in `~/Library/Application Support/AniOnMac/`:
 
@@ -112,7 +155,7 @@ Everything lives in `~/Library/Application Support/AniOnMac/`:
 | `backups/` | One system cursor backup per theme, used by **Undo last change** |
 | `native-reset-recovery.cape` | Cursor state from before the last **Restore macOS appearance** |
 
-## 📁 Project layout
+## Project layout
 
 ```text
 AniOnMac/
