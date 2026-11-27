@@ -32,7 +32,7 @@ import plistlib, os
 from pathlib import Path
 p=Path('AniOnMac.app/Contents/Info.plist')
 langs=sorted(x.stem for x in Path('development/resources').glob('*.json'))
-p.write_bytes(plistlib.dumps(dict(CFBundleDevelopmentRegion='en',CFBundleLocalizations=langs,CFBundleAllowMixedLocalizations=True,CFBundleExecutable='AniOnMac',CFBundleIdentifier='io.anionmac.app',CFBundleName='AniOnMac',CFBundleDisplayName='AniOnMac',CFBundleIconFile='AppIcon',CFBundlePackageType='APPL',CFBundleShortVersionString='0.2.0',CFBundleVersion='5',NSHumanReadableCopyright='© lx3211 · https://github.com/lx3211/AniOnMac',AniOnMacCommit=os.environ.get('commit',''),AniOnMacCommitDate=os.environ.get('commit_date',''),LSMinimumSystemVersion='14.0',NSHighResolutionCapable=True)))
+p.write_bytes(plistlib.dumps(dict(CFBundleDevelopmentRegion='en',CFBundleLocalizations=langs,CFBundleAllowMixedLocalizations=True,CFBundleExecutable='AniOnMac',CFBundleIdentifier='io.anionmac.app',CFBundleName='AniOnMac',CFBundleDisplayName='AniOnMac',CFBundleIconFile='AppIcon',CFBundlePackageType='APPL',CFBundleShortVersionString='0.3.0',CFBundleVersion='6',NSHumanReadableCopyright='© lx3211 · https://github.com/lx3211/AniOnMac',AniOnMacCommit=os.environ.get('commit',''),AniOnMacCommitDate=os.environ.get('commit_date',''),LSMinimumSystemVersion='14.0',NSHighResolutionCapable=True)))
 PY
 codesign --force --sign - "$app"
 codesign --verify --deep --strict "$app"
