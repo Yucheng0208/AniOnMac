@@ -4,6 +4,8 @@ import UniformTypeIdentifiers
 
 @_silgen_name("MeowHoverCursor") func MeowHoverCursor(_ inside: Int32)
 // AppKit owns cursor updates separately from SwiftUI's visual hover state.
+/// The Purin face shown next to the app name (also the source of the app icon).
+let brandLogo = Bundle.main.image(forResource: "logo") ?? NSImage()
 struct SecondaryCopy: ViewModifier {
     func body(content: Content) -> some View {
         content.font(.system(size: 12)).foregroundStyle(.secondary).lineSpacing(4)
@@ -85,6 +87,8 @@ struct SmallActionStyle: ButtonStyle {
 struct CursorPreview: View {
     let asset: PreviewAsset
     let size: Double
+    /// Frames already drawn in a pixel/jagged style at this size; shown without smoothing.
+    var styled: [NSImage]? = nil
     var hotspot: [Double]?
     var mark = false
     var update: (([Double]) -> Void)?
@@ -100,7 +104,7 @@ struct CursorPreview: View {
             let steps = info.playback_frames
             let index = Int(time.date.timeIntervalSinceReferenceDate / max(0.016, info.frame_duration_seconds)) % steps.count
             ZStack(alignment: .topLeading) {
-                Image(nsImage: asset.frames[steps[index]]).resizable().interpolation(.high).frame(width: w, height: h)
+                Image(nsImage: (styled ?? asset.frames)[steps[index]]).resizable().interpolation(styled == nil ? .high : .none).frame(width: w, height: h)
                 if mark {
                     Path { p in
                         let x = hot[0] * w, y = hot[1] * h
@@ -144,6 +148,11 @@ struct ContentView: View {
             .sheet(isPresented: Binding(get: { studio.timeline != nil }, set: { if !$0 { studio.timeline = nil } })) {
                 TimelineSheet(studio: studio, frames: studio.timeline ?? [])
             }
+            .sheet(isPresented: $studio.calibrating) {
+                if let slot = studio.slot, let asset = studio.cache[slot.preview] {
+                    CalibrationSheet(studio: studio, asset: asset, size: slot.size, start: studio.hotNormalized(slot), styled: studio.styledFrames(slot))
+                }
+            }
             .alert(studio.t("errorTitle"), isPresented: Binding(get: { studio.error != nil }, set: { if !$0 { studio.error = nil } })) {
                 Button(studio.t("ok")) { studio.error = nil }
             } message: { Text(studio.t("errorDetail") + "\n\n" + (studio.error ?? "")) }
@@ -162,7 +171,8 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 0) {
             // Brand
             HStack(spacing: 10) {
-                Image(systemName: "cursorarrow.rays").font(.title2).foregroundStyle(accent)
+                Image(nsImage: brandLogo)
+                    .resizable().interpolation(.high).scaledToFit().frame(width: 34, height: 26).accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 1) {
                     Text("AniOnMac").font(.title3.bold())
                     Text("v" + studio.appVersion).font(.caption2).foregroundStyle(.secondary).monospacedDigit()
@@ -312,6 +322,13 @@ struct ContentView: View {
                     Button(studio.t("resetSize")) { studio.size(32) }
                     Button(studio.t("allSizes")) { studio.allSizes() }
                 }.buttonStyle(SmallActionStyle()).font(.caption)
+                HStack(spacing: 10) {
+                    Text(studio.t("styleHeading")).font(.caption)
+                    Picker(studio.t("styleHeading"), selection: Binding(get: { studio.slot?.style ?? "smooth" }, set: { studio.setStyle($0) })) {
+                        ForEach(["smooth", "pixel", "jagged"], id: \.self) { Text(studio.t("style." + $0)).tag($0) }
+                    }.pickerStyle(.segmented).labelsHidden()
+                }.disabled(slot.asset.isEmpty)
+                Text(studio.t("styleHint." + (slot.style ?? "smooth"))).modifier(SecondaryCopy()).fixedSize(horizontal: false, vertical: true)
                 Divider()
                 hotspotEditor(slot)
                 Divider()
@@ -381,7 +398,11 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text(studio.t("hotspotHeading")).font(.caption.weight(.semibold)).foregroundStyle(accent)
-                Spacer(); Button(studio.t("resetHotspot")) { studio.setHotspot(nil) }.buttonStyle(SmallActionStyle()).font(.caption)
+                Spacer()
+                Button { studio.calibrating = true } label: { Label(studio.t("calibrate"), systemImage: "scope") }
+                    .buttonStyle(SmallActionStyle()).font(.caption).help(studio.t("calibrateTip"))
+                    .disabled(slot.asset.isEmpty || studio.cache[slot.preview] == nil)
+                Button(studio.t("resetHotspot")) { studio.setHotspot(nil) }.buttonStyle(SmallActionStyle()).font(.caption)
             }
             HStack {
                 ForEach(0..<2, id: \.self) { axis in
@@ -419,7 +440,7 @@ struct ContentView: View {
                                       pick: { studio.knockout(mode: "wand", point: $0) })
                             .onHover { inside in if inside { NSCursor.crosshair.push() } else { NSCursor.pop() } }
                     } else {
-                        CursorPreview(asset: asset, size: slot.size, hotspot: studio.hotNormalized(slot), mark: showHotspot, update: { studio.setHotspot($0) })
+                        CursorPreview(asset: asset, size: slot.size, styled: studio.styledFrames(slot), hotspot: studio.hotNormalized(slot), mark: showHotspot, update: { studio.setHotspot($0) })
                     }
                 } else { Text(studio.t("noCursor")).font(.callout).foregroundStyle(.secondary) }
             }.frame(height: 310).overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.gray.opacity(0.12)))
@@ -455,7 +476,7 @@ struct ContentView: View {
     var statusSymbol: String {
         switch studio.status {
         case "applyFailed", "loadFailed", "refreshWarning", "nothingRemoved": return "exclamationmark.triangle.fill"
-        case "applied", "alreadyApplied", "nativeRestored", "imported", "backgroundRemoved", "restored", "originalRestored": return "checkmark.circle.fill"
+        case "applied", "alreadyApplied", "nativeRestored", "imported", "backgroundRemoved", "restored", "originalRestored", "calibrateDone": return "checkmark.circle.fill"
         default: return "info.circle"
         }
     }
@@ -598,4 +619,140 @@ struct FrameDrop: DropDelegate {
     }
     func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: .move) }
     func performDrop(info: DropInfo) -> Bool { dragging = nil; return true }
+}
+
+/// Hotspot calibration. Inside the pad the pointer is the cursor being edited, at its real size.
+/// The user puts the tip they see on each dot and clicks; the click lands on the current hotspot,
+/// so the average gap says where the hotspot should be.
+struct CalibrationSheet: View {
+    @ObservedObject var studio: Studio
+    let start: [Double]
+    let width: Double, height: Double
+    let cursor: NSCursor
+    @State private var offsets: [CGPoint] = []
+    @State private var slipped = false
+    static let targets: [CGPoint] = [CGPoint(x: 0.2, y: 0.28), CGPoint(x: 0.8, y: 0.28), CGPoint(x: 0.5, y: 0.5), CGPoint(x: 0.2, y: 0.74), CGPoint(x: 0.8, y: 0.74)]
+
+    init(studio: Studio, asset: PreviewAsset, size: Double, start: [Double], styled: [NSImage]? = nil) {
+        self.studio = studio
+        self.start = start
+        let dims = asset.info.aligned_canvas_px, maximum = dims.max()!
+        width = size * dims[0] / maximum
+        height = size * dims[1] / maximum
+        let frame = (styled ?? asset.frames)[asset.info.playback_frames.first ?? 0]
+        let image = NSImage(size: NSSize(width: width, height: height), flipped: false) { rect in frame.draw(in: rect); return true }
+        let hot = NSPoint(x: min(width - 1, max(0, start[0] * width)), y: min(height - 1, max(0, start[1] * height)))
+        cursor = NSCursor(image: image, hotSpot: hot)
+    }
+
+    var done: Bool { offsets.count >= Self.targets.count }
+
+    /// Mean offset (dot minus click, in points) without the click furthest from the rest, and the corrected hotspot.
+    var solved: (dx: Double, dy: Double, hot: [Double]) {
+        var used = offsets
+        if used.count >= 4 {
+            let mx = used.map(\.x).reduce(0, +) / Double(used.count), my = used.map(\.y).reduce(0, +) / Double(used.count)
+            if let worst = used.indices.max(by: { a, b in
+                hypot(used[a].x - mx, used[a].y - my) < hypot(used[b].x - mx, used[b].y - my) }) { used.remove(at: worst) }
+        }
+        guard !used.isEmpty else { return (0, 0, start) }
+        let dx = used.map(\.x).reduce(0, +) / Double(used.count), dy = used.map(\.y).reduce(0, +) / Double(used.count)
+        return (dx, dy, [min(0.999999, max(0, start[0] + dx / max(1, width))), min(0.999999, max(0, start[1] + dy / max(1, height)))])
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(studio.t("calibrateTitle")).font(.title3.weight(.semibold))
+                Spacer()
+                Text(studio.t("calibrateProgress", "\(min(offsets.count + 1, Self.targets.count))", "\(Self.targets.count)"))
+                    .monospacedDigit().foregroundStyle(.secondary)
+            }
+            Text(studio.t("calibrateHint")).modifier(SecondaryCopy()).fixedSize(horizontal: false, vertical: true)
+            GeometryReader { geo in
+                ZStack(alignment: .topLeading) {
+                    RoundedRectangle(cornerRadius: 14).fill(surface)
+                    CalibrationPad(cursor: cursor) { point in click(point, in: geo.size) }
+                    if done {
+                        result.frame(width: geo.size.width, height: geo.size.height).allowsHitTesting(false)
+                    } else {
+                        let t = Self.targets[offsets.count]
+                        target.position(x: t.x * geo.size.width, y: t.y * geo.size.height).allowsHitTesting(false)
+                    }
+                }
+            }.frame(height: 320).overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.gray.opacity(0.18)))
+            if slipped { Text(studio.t("calibrateTooFar")).font(.caption).foregroundStyle(.orange) }
+            HStack(spacing: 10) {
+                Button(studio.t("calibrateAgain")) { offsets = []; slipped = false }.buttonStyle(SmallActionStyle())
+                Spacer()
+                Button(studio.t("cancel")) { studio.calibrating = false }.buttonStyle(SmallActionStyle()).keyboardShortcut(.cancelAction)
+                Button(studio.t("useHotspot")) {
+                    let hot = solved.hot
+                    studio.calibrating = false
+                    studio.setHotspot(hot)
+                    studio.status = "calibrateDone"
+                }.buttonStyle(SmallActionStyle(primary: true)).keyboardShortcut(.defaultAction).disabled(!done)
+            }.font(.caption)
+        }.padding(22).frame(width: 600).background(canvas).foregroundStyle(ink).tint(accent)
+    }
+
+    var target: some View {
+        ZStack {
+            Circle().stroke(accent, lineWidth: 2)
+            Circle().fill(accent).frame(width: 6, height: 6)
+            Rectangle().fill(accent.opacity(0.45)).frame(width: 1)
+            Rectangle().fill(accent.opacity(0.45)).frame(height: 1)
+        }.frame(width: 30, height: 30)
+    }
+
+    var result: some View {
+        let r = solved
+        func signed(_ v: Double) -> String { (v >= 0 ? "+" : "") + String(format: "%.1f", v) + " pt" }
+        return VStack(spacing: 8) {
+            Text(abs(r.dx) < 1 && abs(r.dy) < 1 ? studio.t("calibrateAccurate") : studio.t("calibrateResult", signed(r.dx), signed(r.dy)))
+                .font(.system(size: 15, weight: .semibold)).multilineTextAlignment(.center)
+            Text(studio.t("calibrateNewHotspot", String(format: "%.1f pt", r.hot[0] * width), String(format: "%.1f pt", r.hot[1] * height)))
+                .modifier(SecondaryCopy())
+        }.padding(20)
+    }
+
+    func click(_ point: CGPoint, in size: CGSize) {
+        guard !done else { return }
+        let t = Self.targets[offsets.count]
+        let offset = CGPoint(x: t.x * size.width - point.x, y: t.y * size.height - point.y)
+        slipped = hypot(offset.x, offset.y) > max(width, height) + 24
+        if !slipped { offsets.append(offset) }
+    }
+}
+
+/// The calibration pad: shows the given cursor and reports clicks (top-left origin, in points).
+struct CalibrationPad: NSViewRepresentable {
+    let cursor: NSCursor
+    let click: (CGPoint) -> Void
+    func makeNSView(context: Context) -> Pad { Pad() }
+    func updateNSView(_ view: Pad, context: Context) {
+        view.cursor = cursor
+        view.click = click
+        view.window?.invalidateCursorRects(for: view)
+    }
+    final class Pad: NSView {
+        var cursor = NSCursor.arrow
+        var click: ((CGPoint) -> Void)?
+        override var isFlipped: Bool { true }
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+        override func resetCursorRects() { addCursorRect(bounds, cursor: cursor) }
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            for area in trackingAreas { removeTrackingArea(area) }
+            addTrackingArea(NSTrackingArea(rect: .zero, options: [.inVisibleRect, .activeAlways, .cursorUpdate, .mouseMoved, .mouseEnteredAndExited], owner: self, userInfo: nil))
+        }
+        override func cursorUpdate(with event: NSEvent) { cursor.set() }
+        override func mouseEntered(with event: NSEvent) { cursor.set() }
+        override func mouseMoved(with event: NSEvent) { cursor.set() }
+        override func mouseExited(with event: NSEvent) { NSCursor.arrow.set() }
+        override func mouseDown(with event: NSEvent) {
+            cursor.set()
+            click?(convert(event.locationInWindow, from: nil))
+        }
+    }
 }

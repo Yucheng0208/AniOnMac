@@ -97,6 +97,30 @@ func canvas(_ w: Int, _ h: Int) throws -> CGContext {
     context.interpolationQuality = .high
     return context
 }
+/// A frame drawn in a style: "jagged" makes every pixel fully opaque or clear; "pixel" also draws on a
+/// grid of `block`-pixel squares, enlarged without smoothing. (The app's preview uses the same rules.)
+func styledFrame(_ image: CGImage, width: Int, height: Int, style: String, block: Int) throws -> CGImage {
+    try require(["pixel", "jagged"].contains(style), "Unknown drawing style")
+    let pixel = style == "pixel"
+    let gw = pixel ? max(1, Int((Double(width) / Double(max(1, block))).rounded())) : width
+    let gh = pixel ? max(1, Int((Double(height) / Double(max(1, block))).rounded())) : height
+    let small = try canvas(gw, gh)
+    small.draw(image, in: CGRect(x: 0, y: 0, width: gw, height: gh))
+    if let data = small.data?.assumingMemoryBound(to: UInt8.self) {
+        for i in stride(from: 0, to: small.bytesPerRow * gh, by: 4) {
+            let a = Int(data[i + 3])
+            if a >= 128 {
+                for c in 0..<3 { data[i + c] = UInt8(min(255, Int(data[i + c]) * 255 / a)) }
+                data[i + 3] = 255
+            } else { data[i] = 0; data[i + 1] = 0; data[i + 2] = 0; data[i + 3] = 0 }
+        }
+    }
+    guard pixel else { return small.makeImage()! }
+    let big = try canvas(width, height)
+    big.interpolationQuality = .none
+    big.draw(small.makeImage()!, in: CGRect(x: 0, y: 0, width: width, height: height))
+    return big.makeImage()!
+}
 func png(_ image: CGImage) throws -> Data {
     let data = NSMutableData()
     guard let dest = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil) else { throw ConversionError(text: "Cannot encode PNG") }
@@ -107,7 +131,7 @@ func png(_ image: CGImage) throws -> Data {
 func gcd(_ a: Int, _ b: Int) -> Int { b == 0 ? a : gcd(b, a % b) }
 let cursorIDs = ["arrow": "com.apple.coregraphics.Arrow", "pointing": "com.apple.cursor.13", "text": "com.apple.coregraphics.IBeam", "wait": "com.apple.coregraphics.Wait"]
 
-func convert(_ source: URL, to output: URL, size: Double, hotspot: [Double]? = nil) throws -> ([String: Any], [String: Any]) {
+func convert(_ source: URL, to output: URL, size: Double, hotspot: [Double]? = nil, style: String = "smooth") throws -> ([String: Any], [String: Any]) {
     try require(size.isFinite && size >= 8 && size <= 128, "Size must be 8–128 points")
     let ani = try ANI(url: source)
     let left = ani.frames.map(\.x).max()!, top = ani.frames.map(\.y).max()!
@@ -146,8 +170,10 @@ func convert(_ source: URL, to output: URL, size: Double, hotspot: [Double]? = n
     for density in [1, 2] {
         let w = max(1, Int((points[0] * Double(density)).rounded())), h = max(1, Int((points[1] * Double(density)).rounded()))
         let context = try canvas(w, h * outputSteps)
+        // Pixel and jagged styles: each frame is drawn at the exact pixel size here (one block = 2 points).
+        let styled = style == "smooth" ? aligned : try aligned.map { try styledFrame($0, width: w, height: h, style: style, block: 2 * density) }
         for (step, index) in playback.enumerated() {
-            context.draw(aligned[index], in: CGRect(x: 0, y: (outputSteps - 1 - step) * h, width: w, height: h))
+            context.draw(styled[index], in: CGRect(x: 0, y: (outputSteps - 1 - step) * h, width: w, height: h))
         }
         reps.append(try png(context.makeImage()!))
     }
@@ -379,7 +405,8 @@ do {
         for slot in slots {
             guard let role = slot["role"] as? String, let identifier = cursorIDs[role], let path = slot["path"] as? String, let size = slot["size"] as? Double else { throw ConversionError(text: "Invalid cursor configuration") }
             try require(cursors[identifier] == nil, "Duplicate cursor mode")
-            cursors[identifier] = try convert(URL(fileURLWithPath: path), to: output.appendingPathComponent(role), size: size, hotspot: slot["hotspot"] as? [Double]).1
+            cursors[identifier] = try convert(URL(fileURLWithPath: path), to: output.appendingPathComponent(role), size: size, hotspot: slot["hotspot"] as? [Double],
+                                                  style: slot["style"] as? String ?? "smooth").1
         }
         let cape: [String: Any] = ["Cursors": cursors, "CapeName": config["name"] as? String ?? "Theme", "Version": 2.0, "MinimumVersion": 2.0]
         let path = output.appendingPathComponent("theme.cape")

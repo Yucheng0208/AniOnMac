@@ -23,7 +23,7 @@ for json in development/resources/*.json; do
   mkdir -p "$app/Contents/Resources/$lang.lproj"
   printf '"CFBundleDisplayName" = "AniOnMac";\n"CFBundleName" = "AniOnMac";\n' > "$app/Contents/Resources/$lang.lproj/InfoPlist.strings"
 done
-cp development/resources/AppIcon.icns "$app/Contents/Resources/"
+cp development/resources/AppIcon.icns development/resources/logo.png "$app/Contents/Resources/"
 commit=$(git rev-parse HEAD 2>/dev/null || true)
 commit_date=$(git log -1 --format=%cI 2>/dev/null || true)
 export commit commit_date

@@ -39,6 +39,8 @@ struct Slot: Codable, Identifiable, Equatable {
     /// Asset/preview before background removal, so it can be restored.
     var originalAsset: String? = nil
     var originalPreview: String? = nil
+    /// Drawing style: nil/"smooth" (high resolution), "pixel" (visible blocks) or "jagged" (hard edges).
+    var style: String? = nil
     var id: String { role }
 }
 struct Profile: Codable, Identifiable {
@@ -180,6 +182,10 @@ func runProcess(_ executable: URL, _ arguments: [String]) async throws -> String
         return table
     }
     func t(_ key: String) -> String { translations[key] ?? key }
+    /// A translation with {0}, {1}… replaced by the arguments.
+    func t(_ key: String, _ args: String...) -> String {
+        args.enumerated().reduce(t(key)) { $0.replacingOccurrences(of: "{\($1.offset)}", with: $1.element) }
+    }
     func setLanguage(_ code: String) {
         let menuBefore = Self.menuLanguage
         library.language = code
@@ -358,6 +364,8 @@ func runProcess(_ executable: URL, _ arguments: [String]) async throws -> String
     }
     /// Frames waiting on the timeline sheet (nil when it is closed).
     @Published var timeline: [URL]? = nil
+    /// True while the hotspot calibration sheet is open.
+    @Published var calibrating = false
 
     func importFrames(_ frames: [URL]) {
         guard !busy, let p = profile, let s = slot else { return }
@@ -539,6 +547,31 @@ func runProcess(_ executable: URL, _ arguments: [String]) async throws -> String
         guard let i = library.profiles.firstIndex(where: { $0.id == library.selected }) else { return }
         library.profiles[i].name = name; save()
     }
+    func setStyle(_ style: String) {
+        guard let pi = library.profiles.firstIndex(where: { $0.id == library.selected }), let si = library.profiles[pi].slots.firstIndex(where: { $0.role == role }) else { return }
+        library.profiles[pi].slots[si].style = style == "smooth" ? nil : style; save()
+    }
+    private var styledCache: [String: [NSImage]] = [:]
+    /// The slot's frames drawn in its style at its real size (for the preview and calibration);
+    /// nil for the smooth style, whose frames are shown as they are.
+    func styledFrames(_ slot: Slot) -> [NSImage]? {
+        let style = slot.style ?? "smooth"
+        guard style != "smooth", let asset = cache[slot.preview] else { return nil }
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        let key = "\(slot.preview)|\(style)|\(slot.size)|\(scale)"
+        if let hit = styledCache[key] { return hit }
+        let dims = asset.info.aligned_canvas_px, maximum = dims.max()!
+        let points = [slot.size * dims[0] / maximum, slot.size * dims[1] / maximum]
+        let w = max(1, Int((points[0] * scale).rounded())), h = max(1, Int((points[1] * scale).rounded()))
+        let frames = asset.frames.map { frame -> NSImage in
+            guard let source = frame.cgImage(forProposedRect: nil, context: nil, hints: nil),
+                  let drawn = renderStyled(source, width: w, height: h, style: style, block: Int(2 * scale)) else { return frame }
+            return NSImage(cgImage: drawn, size: NSSize(width: points[0], height: points[1]))
+        }
+        if styledCache.count > 32 { styledCache.removeAll() }
+        styledCache[key] = frames
+        return frames
+    }
     func size(_ value: Double) {
         guard let pi = library.profiles.firstIndex(where: { $0.id == library.selected }), let si = library.profiles[pi].slots.firstIndex(where: { $0.role == role }) else { return }
         library.profiles[pi].slots[si].size = value.rounded(); save()
@@ -612,6 +645,7 @@ func runProcess(_ executable: URL, _ arguments: [String]) async throws -> String
                 let config: [String: Any] = ["id": p.id, "name": p.name, "slots": p.slots.filter { !$0.asset.isEmpty }.map { slot -> [String: Any] in
                     var d: [String: Any] = ["role": slot.role, "path": root.appendingPathComponent(slot.asset).path, "size": slot.size]
                     if let hotspot = slot.hotspot { d["hotspot"] = hotspot }
+                    if let style = slot.style { d["style"] = style }
                     return d
                 }]
                 let input = job.appendingPathComponent("input.json")
@@ -664,5 +698,38 @@ func runProcess(_ executable: URL, _ arguments: [String]) async throws -> String
                 status = "nativeRestored"; refresh()
             } catch { self.error = error.localizedDescription; status = "applyFailed" }
         }
+    }
+}
+
+/// Draws an image at width × height pixels in a drawing style (the same rules the converter uses
+/// when applying): "jagged" makes every pixel fully opaque or clear; "pixel" also draws on a grid
+/// of `block`-pixel squares, enlarged without smoothing.
+func renderStyled(_ image: CGImage, width: Int, height: Int, style: String, block: Int) -> CGImage? {
+    func context(_ w: Int, _ h: Int) -> CGContext? {
+        CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                  space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+    }
+    let pixel = style == "pixel"
+    let gw = pixel ? max(1, Int((Double(width) / Double(max(1, block))).rounded())) : width
+    let gh = pixel ? max(1, Int((Double(height) / Double(max(1, block))).rounded())) : height
+    guard let small = context(gw, gh) else { return nil }
+    small.interpolationQuality = .high
+    small.draw(image, in: CGRect(x: 0, y: 0, width: gw, height: gh))
+    if style == "jagged" || pixel { hardenEdges(small) }
+    guard pixel, let drawn = small.makeImage() else { return small.makeImage() }
+    guard let big = context(width, height) else { return nil }
+    big.interpolationQuality = .none
+    big.draw(drawn, in: CGRect(x: 0, y: 0, width: width, height: height))
+    return big.makeImage()
+}
+/// Every pixel of a premultiplied RGBA context becomes fully opaque (alpha ≥ 50 %) or fully clear.
+func hardenEdges(_ context: CGContext) {
+    guard let data = context.data?.assumingMemoryBound(to: UInt8.self) else { return }
+    for i in stride(from: 0, to: context.bytesPerRow * context.height, by: 4) {
+        let a = Int(data[i + 3])
+        if a >= 128 {
+            for c in 0..<3 { data[i + c] = UInt8(min(255, Int(data[i + c]) * 255 / a)) }
+            data[i + 3] = 255
+        } else { data[i] = 0; data[i + 1] = 0; data[i + 2] = 0; data[i + 3] = 0 }
     }
 }
